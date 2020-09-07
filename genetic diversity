@@ -1,0 +1,102 @@
+rm(list=ls())
+dev.off()
+
+# To install and load the packages, we will use the pacman package, an R package management tool that combines the functionality of base library related functions to simultaneously perform multiple actions
+if (!require('pacman')) install.packages('pacman', repos="https://cloud.r-project.org") # load pacman package from the repository, if you do not already have it
+pacman::p_load(adegenet,
+               hierfstat,
+               vcfR,
+               pegas,
+               poppr,
+               dplyr,
+               ggpubr,
+               update = FALSE) # logical. If TRUE will attempt to update all out of date packages
+
+setwd("~/dryad/population structure/")
+
+vcf <- read.vcfR("tagua_filtered.sub2.vcf",checkFile = T, convertNA = T) #read in all data
+head(vcf) 
+vcf
+
+### convert to genind object
+gen<-vcfR2genind(vcf)
+pop(gen)<-c(1:length(indNames(gen)))
+
+#calculated Hs per individual
+n.pop <- seppop(gen)
+
+mean.hexp<-vector()
+mean.hobs<-vector()
+inds<-vector()
+tot_alleles<-vector()
+
+for(i in 1:length(n.pop)){
+  inds[i]<-length(indNames(n.pop[[i]]))
+  sum_pop<-summary(n.pop[[i]])
+  mean.hexp[i]<-mean(sum_pop$Hobs[!(is.na(sum_pop$Hobs))])
+  mean.hobs[i]<-mean(sum_pop$Hexp[!(is.na(sum_pop$Hexp))])
+  tot_alleles[i]<-sum_pop$pop.n.all
+}
+
+cbind(indNames(gen),mean.hexp) #Hs per individual, not in order
+
+
+#Compare Hs from southern Andean foothills vs northern Andean foothills using values from the .csv
+id_And<-read.csv("Hs_Andean_foothills.csv")
+
+south<-na.omit(id_And$Hs_south)
+north<-na.omit(id_And$Hs_north)
+
+#obtain means and standard deviation of Hs 
+mean(south)
+sd(south)
+mean(north)
+sd(north)
+
+#Wilcoxon test
+wilcox.test(south, north, alternative = "l")
+
+col<-c("blue","red")
+
+#draw basic boxplot
+boxplot(north, south, col=col,ylab= "Expected heterozygosity (Hs)",
+        ylim=c(0.28,0.48), las=1, names = c("North", "South"))
+
+
+#Compare Hs vs index of paleoclimatic suitability, latitude, and longitude using values from the .csv
+id_vou<-read.csv("ID_voucher.csv")
+
+#Hs vs index of paleoclimatic suitability
+corsuit<-cor.test(id_vou$suit_LGM, id_vou$Hs, method = ("pearson"))
+corsuit
+
+R2_corsuit<-corsuit$estimate*corsuit$estimate
+R2_corsuit
+corsuit$p.value
+
+plot(id_vou$suit_LGM, id_vou$Hs, xlab="Paleoclimatic suitability", ylab="Expected heterozygosity (Hs)", col=col[id_vou$Lineage],lwd=1, cex=1, pch=19,las=1)
+abline(lm(id_vou$Hs~id_vou$suit_LGM), col="black",lty=2, lwd=2)
+
+
+#Hs vs latitude
+corlat<-cor.test(id_vou$Latitude, id_vou$Hs, method = ("pearson"))
+corlat
+
+R2_corlat<-corlat$estimate*corlat$estimate
+R2_corlat
+corlat$p.value
+
+plot(id_vou$Latitude, id_vou$Hs, xlab="Latitude", ylab="Expected heterozygosity (Hs)", col=col[id_vou$Lineage],lwd=1, cex=1, pch=19,las=1)
+abline(lm(id_vou$Hs~id_vou$Latitude), col="black",lty=2, lwd=2)
+
+
+#Hs vs longitude
+corlon<-cor.test(id_vou$Longitude, id_vou$Hs, method = ("pearson"))
+corlon
+
+R2_corlon<-corlon$estimate*corlon$estimate
+R2_corlon
+corlon$p.value
+
+plot(id_vou$Longitude, id_vou$Hs, xlab="Longitude", ylab="Expected heterozygosity (Hs)", col=col[id_vou$Lineage],lwd=1, cex=1, pch=19,las=1)
+abline(lm(id_vou$Hs~id_vou$Longitude), col="black",lty=2, lwd=2)
