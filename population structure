@@ -107,3 +107,7 @@ map.axes(las=1) #Add axes
 palette(col)
 points(as.numeric(as.character(id_vou$Longitude)),as.numeric(as.character(id_vou$Latitude)),col=alpha(col[id_vou$Lineage],0.5),pch=19,cex=1.5) #ugly hack using the groups of the .csv
 
+
+#obtain pairwise FST between clusters
+Fst <- pairwise.fst(aa.genind)
+Fst
