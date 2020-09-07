@@ -1,0 +1,151 @@
+#Written by S. Jarvie, modified by S. Escobar
+
+#erase previous data and plots
+rm(list=ls())
+dev.off()
+
+# To install and load the packages, we will use the pacman package, an R package management tool that combines the functionality of base library related functions to simultaneously perform multiple actions
+if (!require('pacman')) install.packages('pacman', repos="https://cloud.r-project.org") # load pacman package from the repository, if you do not already have it
+pacman::p_load(maxnet, # an R package that implements much of the functionality of the Maxent Java application
+               randomForest, # an R package that implements Breiman's random forest algorithm for classification and regression
+               biomod2, # an R package to support species distribution models as well as ensemble to models 
+               blockCV, # an R package to create spatially or environmentally separated training and testing folds for cross-validation 
+               dismo, # an R package to support species distribution modelling
+               ecospat, # an R package to support analyses of spatial ecology analyses 
+               precrec, # an R package for accurate and fast calculations of Precision-Recall and ROC curves 
+               plotROC, # an R package that implements ROC curve plots and interactive tools
+               raster, #  an R package for handling rasters both in memory and on disk
+               sf, # an R package to implement simple features, a standardised way of encoding spatial vector data 
+               tidyverse, # a coherent system of R packages for data manipulation, exploration and visualisation 
+               update = FALSE) # logical. If TRUE will attempt to update all out of date packages
+
+# import presence-background species data 
+presence <- read.csv("~/dryad/paleoecological niche modelling/occurrence records/thinned_10km.csv")
+presence$species <- "palm"
+
+r_bg <- read.csv("~/dryad/paleoecological niche modelling/occurrence records/palm_background-1km_raster-200km_buffer-behrmann.csv")
+r_bg$species <- "background"
+
+# import CURRENT climatic data
+climate <- raster::stack("~/dryad/paleoecological niche modelling/climatic data 1km/current/bio_7.tif",
+                         "~/dryad/paleoecological niche modelling/climatic data 1km/current/bio_14.tif",
+                         "~/dryad/paleoecological niche modelling/climatic data 1km/current/current_30arcsec_PETDriestQuarter.tif",
+                         "~/dryad/paleoecological niche modelling/climatic data 1km/current/current_30arcsec_PETWettestQuarter.tif")
+
+plot(climate)
+
+# concatenate all data into one dataframe
+data_maxent <- rbind(presence, r_bg)
+# presence (1) or backgroung (0) column
+data_maxent$presence <- c(
+  rep(1, nrow(presence)),
+  rep(0, nrow(r_bg))
+)
+
+data_maxent2 <- data_maxent %>% select(longitude, latitude)
+
+data_maxent1 <- raster::extract(x = climate, y = data_maxent2) %>% as.data.frame()
+
+mydata <- data_maxent1 %>% select(bio_7, bio_14, current_30arcsec_PETDriestQuarter, current_30arcsec_PETWettestQuarter)
+PB <- data_maxent %>% select(Species = presence, x = longitude, y = latitude)
+
+pb_data <- st_as_sf(PB, coords = c("x", "y"), crs = "+proj=cea +lon_0=0 +lat_ts=30 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0 ")
+# number of presence and background records
+table(pb_data$Species)
+
+# create a vector of 1 (for presence) and 0 (for background)
+pb <- pb_data$Species
+
+# spatial blocking by rows and columns with checkerboard assignment
+sb <- spatialBlock(speciesData = pb_data, # presence-background data
+                   species = "Species",
+                   rasterLayer = climate[[1]],
+                   rows = 5,
+                   cols = 5,
+                   k = 5,
+                   selection = "systematic",
+                   biomod2Format = FALSE)
+folds <- sb$folds
+
+# extract the folds in buffering object created in the previous section (with presence-background data)
+# create an empty vector to store the AUC of each fold
+AUCs <- vector()
+CBIs <- vector()
+OR10s <- vector()
+ORMTPs <- vector()
+MSSs <- vector()
+
+for(k in 1:length(folds)){
+  trainSet <- unlist(folds[[k]][1]) # extract the training set indices
+  testSet <- unlist(folds[[k]][2]) # extract the testing set indices
+  # fitting a maxent model using linear, quadratic and product features
+  mx <- maxnet(pb[trainSet], mydata[trainSet, ], regmult = 1.5, maxnet.formula(pb[trainSet], mydata[trainSet, ], classes = "lqp"))
+  testTable <- pb_data[testSet, ] # a table for testing predictions and reference data
+  testTable$pred <- predict(mx, mydata[testSet, ], type = "cloglog") # predict the test set
+  # evaluation statistics preparation
+  # calculate area under the ROC curve
+  precrec_obj <- evalmod(scores = testTable$pred, labels = testTable$Species) # calculate AUC using precrec package
+  auc <- auc(precrec_obj)[1, 4] 
+  #auc <- calc_auc(ggplot(testTable, aes(m = pred, d = Species)) + geom_roc(n.cuts = 0))[3] # calculte AUC using plotROC package
+  # calculate CBI using the ecospat.boyce function in the ecospat package
+  prediction <- predict(mx, mydata, type = 'cloglog')
+  cbi <- ecospat.boyce(fit = prediction, obs = prediction[pb == 1],
+                       nclass = 0, window.w = "default", res = 100,
+                       PEplot = T)
+  # model overfitting and thresholds
+  # ORMin 
+  ORMin <- min(prediction[pb == 1])
+  # OR10
+  OR10 <- sort(prediction[pb == 1])[ceiling(length(prediction[pb == 1]) / 10)]
+  # MSS
+  eval <- dismo::evaluate(p = prediction[pb == 1], a = prediction[pb == 0]) # specify to run the evaluate() function from dismo due to namespace conflicts
+  MSS <- eval@t[which.max(eval@TPR + eval@TNR)]
+  # from the iterations
+  AUCs[k] <- as.numeric(auc)
+  CBIs[k] <- as.numeric(cbi$Spearman.cor)
+  ORMTPs[k] <- as.numeric(ORMin)
+  OR10s[k] <- as.numeric(OR10)
+  MSSs[k] <- as.numeric(MSS)
+  # write csv of the evaluation statistics
+  evaluation_stats <- tibble(
+    AUC_mean = round(mean(AUCs), 3),
+    AUC_sd = round(sd(AUCs), 3),
+    CBI_mean = round(mean(CBIs), 3),
+    CBI_sd = round(sd(CBIs), 3),
+    ORMTP_mean = round(mean(ORMTPs), 3),
+    ORMTP_sd = round(sd(ORMTPs), 3),
+    OR10_mean = round(mean(OR10s), 3),
+    OR10_sd = round(sd(OR10s), 3),
+    MSS_mean = round(mean(MSSs), 3),
+    MSS_sd = round(sd(MSSs), 3),
+  ) %>%
+    write_csv("~/dryad/paleoecological niche modelling/evaluation_statistics-worldclim.csv")
+  # fitting a maxent model with the full dataset using linear, quadratic and product features
+  me <- maxnet(
+    p = pb_data$Species,
+    data = mydata,
+    regmult = 1.5,
+    f = maxnet.formula(p = pb_data$Species, data = mydata, classes = 'lqp')
+  )
+  # generate the raster for the maxent model
+  final_suitability <- predict(
+    climate, me, 
+    type = "cloglog")
+  # write rasters
+  #writeRaster(x = final_suitability, filename = "~/Desktop/suitability.tif", overwrite = TRUE)
+  # suitability_mss <- final_suitability > mean(MSSs)
+  # writeRaster(x = suitability_mss, filename = "~/Desktop/suitability_mss.tif", overwrite = TRUE)
+  # suitability_min <- final_suitability > mean(ORMTPs)
+  # writeRaster(x = suitability_min, filename = "~/Desktop/suitability_min.tif", overwrite = TRUE)
+  # suitability_OR10 <- final_suitability > mean(OR10s)
+  # writeRaster(x = suitability_OR10, filename = "~/Desktop/suitability_OR10.tif", overwrite = TRUE)
+}
+
+#obtain CBI
+mean(CBIs)
+
+#obtain ORmtp
+mean(ORMTPs)
+
+#obtain MSS value
+mean(MSSs)
