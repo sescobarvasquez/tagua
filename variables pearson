@@ -1,0 +1,29 @@
+#Written by S. Jarvie, modified by S. Escobar
+
+# To install and load the packages, we will use the pacman package, an R package management tool that combines the functionality of base library related functions to simultaneously perform multiple actions
+if (!require('pacman')) install.packages('pacman', repos="https://cloud.r-project.org") # load pacman package from the repository, if you do not already have it
+pacman::p_load(raster, 
+               dplyr,
+               maxnet,
+               corrplot,
+               ggplot2,
+               update = F)
+
+#import and stack Worldclim raster variables
+setwd("~/dryad/paleoecological niche modelling/climatic data 1km/current/")
+tif <- list.files(pattern = "\\.tif$") # 
+tif_stack <- stack(tif)
+
+#check pairwise collinearity for all variables
+bioclimatic_pearson_current <- layerStats(x = tif_stack, stat = 'pearson', na.rm = TRUE)
+bioclimatic_pearson_round <- round(bioclimatic_pearson_current$`pearson correlation coefficient`, 2)
+corrplot(bioclimatic_pearson_round, method = "color", type = "lower", addCoef.col = "black", tl.col = "black", tl.cex = 0.5, number.cex = 0.3, cl.cex = 0.5)
+
+
+#subset of ecologically meaningful variables
+tif_bioclimatic <- tif_stack[[c("bio_7", "bio_14", "current_30arcsec_PETDriestQuarter", "current_30arcsec_PETWettestQuarter")]]
+
+#check pairwise collinearity for ecologically meaningful variables
+meaningful_pearson_current <- layerStats(x = tif_bioclimatic, stat = 'pearson', na.rm = TRUE)
+meaningful_pearson_round <- round(meaningful_pearson_current$`pearson correlation coefficient`, 2)
+corrplot(meaningful_pearson_round, method = "color", type = "lower", addCoef.col = "black", tl.col = "black", tl.cex = 1, number.cex = 1, cl.cex = 1)
