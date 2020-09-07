@@ -1,0 +1,337 @@
+#Written by S. Jarvie, modified by S. Escobar
+# This script contains the maxent algorithm using the maxnet package, k_fold_function()
+
+#erase previous data and plots
+rm(list=ls())
+dev.off()
+
+if (!require('pacman')) install.packages('pacman', repos="https://cloud.r-project.org") # load pacman package from the repository, if you do not already have it
+#install.packages("pacman")
+pacman::p_load(ENMeval,
+               dismo,
+               maxnet,
+               rgbif,  
+               tidyverse,  
+               cowplot,    
+               ecospat,    
+               countrycode, 
+               CoordinateCleaner, 
+               tmap,   
+               spocc,
+               spThin,
+               maptools,
+               rgdal,
+               sp,
+               dplyr,
+               rgeos,
+               rworldmap,
+               rworldxtra,
+               BIEN,
+               scrubr,
+               biogeo,
+               grid,
+               raster,
+               sf,
+               update = FALSE)
+
+# import CURRENT climatic data
+climate <- raster::stack("~/dryad/paleoecological niche modelling/climatic data 1km/current/bio_7.tif",
+                         "~/dryad/paleoecological niche modelling/climatic data 1km/current/bio_14.tif",
+                         "~/dryad/paleoecological niche modelling/climatic data 1km/current/current_30arcsec_PETDriestQuarter.tif",
+                         "~/dryad/paleoecological niche modelling/climatic data 1km/current/current_30arcsec_PETWettestQuarter.tif")
+
+# import PAST climatic data
+lgm_cc_climate <- raster::stack("~/dryad/paleoecological niche modelling/climatic data 1km/lgm/ccsm4/cclgmbi7.tif",
+                                "~/dryad/paleoecological niche modelling/climatic data 1km/lgm/ccsm4/cclgmbi14.tif", 
+                                "~/dryad/paleoecological niche modelling/climatic data 1km/lgm/ccsm4/lgm_ccsm4_2.5arcmin_PETDriestQuarter.tif",
+                                "~/dryad/paleoecological niche modelling/climatic data 1km/lgm/ccsm4/lgm_ccsm4_2.5arcmin_PETWettestQuarter.tif")
+
+lgm_me_climate <- raster::stack("~/dryad/paleoecological niche modelling/climatic data 1km/lgm/me/melgmbi7.tif", 
+                                "~/dryad/paleoecological niche modelling/climatic data 1km/lgm/me/melgmbi14.tif", 
+                                "~/dryad/paleoecological niche modelling/climatic data 1km/lgm/me/lgm_mpi_esm_p_2.5arcmin_PETDriestQuarter.tif",
+                                "~/dryad/paleoecological niche modelling/climatic data 1km/lgm/me/lgm_mpi_esm_p_2.5arcmin_PETWettestQuarter.tif")
+
+lgm_mr_climate <- raster::stack("~/dryad/paleoecological niche modelling/climatic data 1km/lgm/mr/mrlgmbi7.tif", 
+                                "~/dryad/paleoecological niche modelling/climatic data 1km/lgm/mr/mrlgmbi14.tif", 
+                                "~/dryad/paleoecological niche modelling/climatic data 1km/lgm/mr/lgm_miroc_esm_2.5arcmin_PETDriestQuarter.tif",
+                                "~/dryad/paleoecological niche modelling/climatic data 1km/lgm/mr/lgm_miroc_esm_2.5arcmin_PETWettestQuarter.tif")
+
+names(lgm_cc_climate) <- names(climate) # to use the predict function, the climate variables need to be spelled the same
+names(lgm_me_climate) <- names(climate)
+names(lgm_mr_climate) <- names(climate)
+
+
+# import species records
+records <- read.csv("~/dryad/paleoecological niche modelling/occurrence records/thinned_10km.csv")
+
+# extract environment at sites ----
+records_climate <- raster::extract(climate, records)
+# remove any sites with NA for at least one variable
+isNa <- is.na(rowSums(records_climate)) 
+if(any(isNa)){
+  records <- records[-which(isNa), ]
+  records_climate <- records_climate[-which(isNa), ]
+}
+# Make buffer ----
+presence <- records
+coordinates(presence) <- ~ longitude + latitude
+presence_buffer <- raster::buffer(presence, width = 500000, dissolve = TRUE) 
+# make the extent around the bounding box
+bb_buf <- raster::extent(x = presence_buffer)
+# crop environmental layers to match the study extent
+climate_crop <- raster::crop(x = climate, y = bb_buf) # we crop before the mask as this makes the process much quicker, especially for complex shapes
+climate_mask <- raster::mask(x = climate_crop, mask = presence_buffer)
+# this step is to make the target-background approach (sensu Phillips et al. 2009) that should account for the sampling bias
+# we first convert sp object to a sf object for use in analyses. 
+sf_presence_buffer <- sf::st_as_sf(presence_buffer)
+
+
+
+# import the presence records for the family Arecaceae that was downloaded from the BIEN database. See the BIEN website for more information and Maitner et al. 2017 for the scientific publication describing the data: https://besjournals.onlinelibrary.wiley.com/doi/full/10.1111/2041-210X.12861. The Rubiaceaee presence records have already been reprojected to the Behrmann equal area projection and duplicates from 1km grid cells have been removed
+target_background <- read.csv("~/dryad/paleoecological niche modelling/occurrence records/palm_background-1km_raster-200km_buffer-behrmann.csv") # read in the data and assign to an object
+r_bg_climate <- target_background
+# to convert to sp object
+target_background_sp <- target_background # to convert a spatial point database
+coordinates(target_background_sp) <- ~ longitude + latitude
+# we now select the occurrence records for the Rubiacaee family from within the buffered extent
+point_background_buffer <- target_background_sp[presence_buffer, ] # this is as a spatial point object
+sf_point_background_buffer <- sf::st_as_sf(point_background_buffer) # we next convert from the spatial point object to a sf object
+sp_point_background_buffer <- sf::as_Spatial(sf_point_background_buffer) # then back to the spatial point oject
+df_point_background_buffer <- as.data.frame(sp_point_background_buffer) %>% dplyr::select(longitude = coords.x1, latitude = coords.x2) # we change the spatial point object to a dataframe and  then select out the appropriate columns, renaming them to be more intuitive
+#dim(df_point_background_buffer) # check the dimensions of the new dataframe
+df_point_background_buffer <- df_point_background_buffer %>% # 
+  filter(!is.na(latitude)) %>%
+  filter(!is.na(longitude)) %>%
+  dplyr::select(longitude, latitude)
+r_bg_climate <- df_point_background_buffer # assign to a new object
+r_bg_points <- df_point_background_buffer
+# extract environment at sites
+r_bg_climate <- raster::extract(climate, r_bg_climate)
+# remove any sites with NA for at least one variable
+isNa <- is.na(rowSums(r_bg_climate)) 
+if(any(isNa)){
+  r_bg_points <- r_bg_points[-which(isNa), ]
+  r_bg_climate <- r_bg_climate[-which(isNa), ]
+}
+# combine with coordinates
+presence <- cbind(records, records_climate)
+r_bg <- cbind(r_bg_points, r_bg_climate) 
+# concatenate all data into one dataframe
+data_maxent <- rbind(presence, r_bg)
+# presence (1) or backgroung (0) column
+data_maxent$presence <- c(
+  rep(1, nrow(presence)),
+  rep(0, nrow(r_bg))
+)
+source("~/dryad/paleoecological niche modelling/k_fold_function.R") # remember to change the working directory
+KFOLD = 5 # we can vary the k-fold cross-validation; fivefold is commmon, but maybe it would be nice to do tenfold
+kfold_presence <- data_maxent %>% filter(presence == 1) %>% kfold(KFOLD)
+kfold_background <- data_maxent %>% filter(presence == 0) %>% kfold(KFOLD)
+data_maxent$kfold <- c(kfold_presence, kfold_background)
+# run a trycatch in case something fails  ----
+model_stats <- tryCatch(
+  lapply(1:KFOLD, k_fold, data_maxent),
+  error = function(e){
+    # change the pathway for the working directory ----
+    sink("Log.txt", append = T)
+    print(paste(taxon, "fails for maxnet:", e))
+    sink()
+    skip_species <- T
+    return(NA)
+  }
+)
+if(any(is.na(model_stats))){
+  return(0)
+}
+model_stats <- do.call(rbind, model_stats)
+# to run the maxnet model ----
+me <- maxnet(
+  p = data_maxent$presence,
+  data = data_maxent[3:6],
+  regmult = 1.5, # the default regularisation multiplier is 1, but you can alter this
+  f = maxnet.formula(p = data_maxent$presence, 
+                     data = data_maxent[3:6], 
+                     classes = 'lqp') # this changes the feature classes; l = linear, q = quadratic, h = hinge, p = product, t = threshold
+)
+# to calculate the variable importance ----
+var_importance <- ecospat.maxentvarimport(model = me, dfvar = presence[3:6], nperm = 10) # this calculates the variable importance. I am not too familiar how this works, but will send you a paper that explains, when you are ready. The default for the nperm is 5, but I have seen it increased to 10 elsewhere
+var_importance_df <- as.data.frame(var_importance)
+view(var_importance_df) 
+# write_csv(x = var_importance_df, path = "~/Desktop/var_importance.csv") # to write out the dataframe
+# predict suitability and save raster
+suitability <- predict(
+  climate_crop, # climate variables
+  me, # full model
+  type = "cloglog"#,
+  # change the pathway to the working directory ----
+  #filename = paste0("../../../../forecasting/maps/", taxon), 
+  #format = "GTiff", 
+  #overwrite = TRUE
+)
+lgm_cc_suitability <- predict(
+  lgm_cc_climate, # climate variables
+  me, # full model
+  type = "cloglog"#,
+  # change the pathway to the working directory ----
+  #filename = paste0("../../../../forecasting/maps/", taxon), 
+  #format = "GTiff", 
+  #overwrite = TRUE
+)
+lgm_me_suitability <- predict(
+  lgm_me_climate, # climate variables
+  me, # full model
+  type = "cloglog"#,
+  # change the pathway to the working directory ----
+  #filename = paste0("../../../../forecasting/maps/", taxon), 
+  #format = "GTiff", 
+  #overwrite = TRUE
+)
+lgm_mr_suitability <- predict(
+  lgm_mr_climate, # climate variables
+  me, # full model
+  type = "cloglog"#,
+  # change the pathway to the working directory ----
+  #filename = paste0("../../../../forecasting/maps/", taxon), 
+  #format = "GTiff", 
+  #overwrite = TRUE
+)
+
+
+###transform to binary maps (presence/absence)
+suitability_MSS <- suitability >= 0.3196595 #choose the mean(MSSs) value from the blockCV script
+
+###average the three maps from the LGM and transform to binary (presence/absence)
+lgm_averaged_suitability <- (lgm_cc_suitability + lgm_me_suitability + lgm_mr_suitability)/3
+lgm_averaged_suitability_MSS <- lgm_averaged_suitability >= 0.3196595 #choose the mean(MSSs) value from the blockCV script
+
+###areas of historical climatic suitability
+refugia <-  suitability_MSS + lgm_averaged_suitability_MSS
+
+###crop maps to the area of interest (western Ecuador)###
+e <- as(extent(-8050000, -7400000, -650000, 300000), 'SpatialPolygons')
+crs(e) <- "+proj=longlat +datum=WGS84 +no_defs"
+
+suitability <- crop(suitability, e)
+lgm_averaged_suitability <- crop(lgm_averaged_suitability, e)
+refugia <- crop(refugia, e)
+
+
+#plot figures using TMAP
+#import coastline shapefiles
+current_shp <- st_read("~/dryad/paleoecological niche modelling/coastline/current_1km_shp.shp")
+#plot(current_shp)
+lgm_shp <- st_read("~/dryad/paleoecological niche modelling/coastline/lgm_ccsm4_1km_shp.shp")
+#plot(lgm_shp)
+
+data("World", "land", "rivers", package = "tmap")
+
+tmap_mode("plot") 
+
+#plot current map
+#obtain occurrence records used
+palms_sf <- st_as_sf(records, 
+                     coords = c('longitude', 'latitude'),
+                     crs = "+proj=cea +lon_0=0 +lat_ts=30 +x_0=0 +y_0=0 +datum=WGS84
+ +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+tm1 <- tm_shape(suitability) +
+  tm_raster("layer", 
+            title = "Climatic suitability",
+            midpoint = NA,
+            style = "cont",
+            legend.reverse = TRUE,
+            breaks=c(0,0.2,0.4,0.6,0.8,1),
+            palette = "seq",
+            alpha = 0.9) +
+  tm_shape(palms_sf) +
+  tm_symbols(col = "#FF4500",
+             shape = 19,
+             size = 0.3,
+             alpha = 1)+
+  tm_add_legend(c("#FF4500"),
+                type = "symbol",
+                labels = c("Occurrence records"),
+                shape = 19,
+                alpha = 0.9)+
+  tm_shape(current_shp) +
+  tm_borders("black",
+             lwd = 1,
+             alpha = 1,
+             lty = 1) +
+  tm_layout(aes.palette = list(seq = "viridis"))
+tm1
+
+
+#plot LGM averaged map
+tm2 <- tm_shape(lgm_averaged_suitability) +
+  tm_raster("layer", 
+            title = "Paleoclimatic suitability",
+            midpoint = NA,
+            style = "cont",
+            breaks=c(0,0.2,0.4,0.6,0.8,1),
+            legend.reverse = TRUE,
+            palette = "seq",
+            alpha = 0.9) +
+  tm_shape(current_shp) +
+  tm_borders("black",
+             lwd = 1,
+             alpha = 1,
+             lty = 1) +
+  tm_shape(lgm_shp) +
+  tm_borders("black",
+             lwd = 1,
+             alpha = 1,
+             lty = 2) +
+  tm_layout(aes.palette = list(seq = "viridis"))
+tm2
+
+#plot map for areas of historical climatic suitability
+#obtain occurrence records in Berhmann format for the individuals of the two genetic clusters (see population structure script)
+north_records <- read.csv("~/dryad/paleoecological niche modelling/occurrence records/northern.csv")
+palms_north_sf <- st_as_sf(north_records, 
+                           coords = c('Longitude', 'Latitude'),
+                           crs = "+proj=cea +lon_0=0 +lat_ts=30 +x_0=0 +y_0=0 +datum=WGS84
+ +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+
+south_records <- read.csv("~/dryad/paleoecological niche modelling/occurrence records/southern.csv")
+palms_south_sf <- st_as_sf(south_records, 
+                           coords = c('Longitude', 'Latitude'),
+                           crs = "+proj=cea +lon_0=0 +lat_ts=30 +x_0=0 +y_0=0 +datum=WGS84
+ +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+tm3 <- tm_shape(refugia) +
+  tm_raster("layer", 
+            title = "Historical climatic suitability",
+            midpoint = NA,
+            style = "cat",
+            legend.reverse = TRUE,
+            palette = "seq",
+            alpha = 0.9) +
+  tm_shape(palms_north_sf) +
+  tm_symbols(col = "blue",
+             shape = 19,
+             size = 0.3,
+             alpha = 1)+
+  tm_add_legend(c("blue"),
+                type = "symbol",
+                labels = c("North"),
+                shape = 19)+
+  
+  tm_shape(palms_south_sf) +
+  tm_symbols(col = "red",
+             shape = 19,
+             size = 0.3,
+             alpha = 1)+
+  tm_add_legend(c("red"),
+                type = "symbol",
+                labels = c("South"),
+                shape = 19)+
+  
+  tm_shape(current_shp) +
+  tm_borders("black",
+             lwd = 1,
+             alpha = 1,
+             lty = 1) +
+  tm_layout(aes.palette = list(seq = "viridis"))
+tm3
