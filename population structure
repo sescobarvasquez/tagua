@@ -1,0 +1,109 @@
+#Written by A. J. Helmstetter, modified by S. Escobar
+
+#erase previous data and plots
+rm(list=ls())
+dev.off()
+
+# To install and load the packages, we will use the pacman package, an R package management tool that combines the functionality of base library related functions to simultaneously perform multiple actions
+if (!require('pacman')) install.packages('pacman', repos="https://cloud.r-project.org") # load pacman package from the repository, if you do not already have it
+pacman::p_load(MASS,
+               pegas,
+               vcfR,
+               tidyverse,
+               maps,
+               scales,
+               update = FALSE) # logical. If TRUE will attempt to update all out of date packages
+
+setwd("~/population structure")
+
+id_ind<-read.csv("ID_index.csv")
+id_vou<-read.csv("ID_voucher.csv")
+
+#change the name of the individuals
+only_seq<-id_vou[id_vou$ID%in%id_ind$ID,]
+sort(id_ind$ID)
+id_ind[order(id_ind$ID),]
+foo<-cbind(only_seq[order(only_seq$ID),],id_ind[order(id_ind$ID),])
+sb<-data.frame(as.character(foo$ID),as.character(foo$voucher))
+colnames(sb)<-c('ID','voucher')
+sb$ID<-as.character(sb$ID) 
+sb$voucher<-as.character(sb$voucher)
+sb<-sb[match(sort(sb$ID),sb$ID),]
+sb<-sb[order(sb$ID),]
+
+#load the genetic data
+vcf <- read.vcfR("tagua_filtered.sub2.vcf",checkFile = T, convertNA = T) #read in all data
+head(vcf) 
+vcf
+
+#transform to a genlight pbject
+aa.genlight <- vcfR2genlight(vcf, n.cores=1)
+indNames(aa.genlight) <-sb$voucher
+
+#PCA
+pca.1 <- glPca(aa.genlight, nf=300, n.cores=2) # retain first 300 axes (for later use in find.clusters); slow function
+plot(pca.1$scores[,1],pca.1$scores[,2], xlab="PCA 1", ylab="PCA 2",pch=1,cex=1.5,las=1)
+text(pca.1$scores[,1],pca.1$scores[,2], labels=names(pca.1$scores[,1]), cex= 0.7, pos=4)
+
+#find number of genetic clusters
+grp <- find.clusters(aa.genlight, max.n.clust=20, glPca = pca.1, perc.pca =
+                       100, n.iter=1e6, n.start=1000) 
+300
+2
+#choose the 300 axes previously retained
+#choose two genetic clusters based on the BIC plot
+
+dapc2 <- dapc(aa.genlight, grp$grp,n.da=100, n.pca=300)
+
+#use this to pick the number of PCs to keep in the dapc
+temp <- optim.a.score(dapc2)
+
+dapc1<-dapc(aa.genlight, grp$grp, glPca = pca.1)
+1 
+1
+# choose number of PCs based on the a-score optimisation plot
+# write the number of clusters chosen minus one
+
+#cluster assigned to each individuals
+dapc1$grp #check that the cluster with major number of individuals gets number 1
+#number of individuals per cluster
+table(dapc1$grp)
+
+
+#cross validation
+#transform vcf to genind
+aa.genind <- vcfR2genind(vcf)
+#set populations based on DAPC results
+dapcgrp<-dapc1$grp
+dapcgrp<-dapcgrp[order(match(names(dapcgrp),indNames(aa.genind)))]
+pop(aa.genind) <- dapcgrp
+
+set.seed(999)
+pramx <- xvalDapc(tab(aa.genind, NA.method = "mean"), pop(aa.genind))
+system.time(xval <- xvalDapc(tab(aa.genind, NA.method = "mean"), pop(aa.genind),n.pca.max=300,
+                             result = "groupMean", center = TRUE, scale = FALSE,
+                             n.pca = NULL, n.rep = 30, xval.plot = TRUE,
+                             parallel = "multicore", ncpus = 3))
+
+xval[2:6]
+
+
+#choose colors for clusters
+col<- c("blue","red")
+
+#make complot figure, not ordered
+compoplot(dapc1, cex.names = 0.5, col=col,show.lab=T,legend=F)
+
+#make scatter figure
+scatter(dapc1, cex = 2, legend = TRUE,
+        clabel = FALSE, posi.leg = "bottomleft", scree.pca = TRUE,
+        posi.pca = "topright", cleg = 0.75, xax = 1, yax = 2, inset.solid = 1)
+
+
+# draw basic map
+map('world', xlim=c(-82,-77.5), ylim=c(-5.1,2), col=F, fill=T)
+map('world', xlim=c(-82,-77.5), ylim=c(-5.1,2), col=F, fill=T)
+map.axes(las=1) #Add axes
+palette(col)
+points(as.numeric(as.character(id_vou$Longitude)),as.numeric(as.character(id_vou$Latitude)),col=alpha(col[id_vou$Lineage],0.5),pch=19,cex=1.5) #ugly hack using the groups of the .csv
+
