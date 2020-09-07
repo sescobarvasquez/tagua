@@ -1,5 +1,9 @@
 #Written by S. Jarvie, modified by S. Escobar
 
+#erase previous data and plots
+rm(list=ls())
+dev.off()
+
 # To install and load the packages, we will use the pacman package, an R package management tool that combines the functionality of base library related functions to simultaneously perform multiple actions
 if (!require('pacman')) install.packages('pacman', repos="https://cloud.r-project.org") # load pacman package from the repository, if you do not already have it
 pacman::p_load(raster, 
